@@ -1,7 +1,9 @@
 // File: main.dart
+import 'package:shop/Expenses.dart';
+import 'package:shop/analyticsPage.dart';
+import 'package:shop/menupage.dart';
+import 'package:shop/pdfpage.dart';
 import 'package:flutter/material.dart';
-import 'package:shop/menu.dart';
-import 'package:shop/pdf.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 import 'package:sqflite/sqflite.dart';
 import 'dart:io';
@@ -18,6 +20,7 @@ void main() async {
 }
 
 class MyApp extends StatelessWidget {
+  const MyApp({Key? key}) : super(key: key);
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
@@ -94,12 +97,14 @@ class Product {
 
 class BillItem {
   final Product product;
-  int quantity;
-  double get totalPrice => product.price * quantity;
+  double weight; // in grams
+  double get totalPrice =>
+      product.price *
+      (weight / 1000); // Convert grams to kg for price calculation
 
   BillItem({
     required this.product,
-    this.quantity = 1,
+    this.weight = 1000, // Default weight is 1kg (1000g)
   });
 }
 
@@ -158,54 +163,84 @@ class DatabaseHelper {
     // For desktop apps, use a fixed path relative to current directory
     String dbPath;
     if (Platform.isWindows) {
-      dbPath = 'billing_system.db';
+      dbPath = 'shop.db';
     } else if (Platform.isLinux || Platform.isMacOS) {
       final homeDir = Platform.environment['HOME'];
-      dbPath =
-          homeDir != null ? '$homeDir/billing_system.db' : 'billing_system.db';
+      dbPath = homeDir != null ? '$homeDir/shop.db' : 'shop.db';
     } else {
       // For mobile platforms
-      dbPath = 'billing_system.db';
+      dbPath = 'shop.db';
     }
 
     return await openDatabase(
       dbPath,
-      version: 1,
+      version: 2, // Incremented version number for schema change
       onCreate: _createDB,
+      onUpgrade: _upgradeDB, // Added onUpgrade callback
     );
   }
 
   Future _createDB(Database db, int version) async {
     await db.execute('''
-      CREATE TABLE products (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        name TEXT NOT NULL,
-        price REAL NOT NULL,
-        serialNumber INTEGER NOT NULL UNIQUE
-      )
-    ''');
+    CREATE TABLE products (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      price REAL NOT NULL,
+      serialNumber INTEGER NOT NULL UNIQUE
+    )
+  ''');
 
     await db.execute('''
-      CREATE TABLE bills (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        date TEXT NOT NULL,
-        total REAL NOT NULL,
-        tax REAL NOT NULL,
-        grandTotal REAL NOT NULL
-      )
-    ''');
+    CREATE TABLE bills (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      date TEXT NOT NULL,
+      total REAL NOT NULL,
+      tax REAL NOT NULL,
+      grandTotal REAL NOT NULL
+    )
+  ''');
 
     await db.execute('''
-      CREATE TABLE bill_items (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        billId INTEGER NOT NULL,
-        productId INTEGER NOT NULL,
-        quantity INTEGER NOT NULL,
-        price REAL NOT NULL,
-        FOREIGN KEY (billId) REFERENCES bills(id),
-        FOREIGN KEY (productId) REFERENCES products(id)
-      )
-    ''');
+    CREATE TABLE bill_items (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      billId INTEGER NOT NULL,
+      productId INTEGER NOT NULL,
+      weight REAL NOT NULL,  /* Changed from quantity to weight */
+      price REAL NOT NULL,
+      FOREIGN KEY (billId) REFERENCES bills(id),
+      FOREIGN KEY (productId) REFERENCES products(id)
+    )
+  ''');
+  }
+
+  // Add this new method to handle database upgrades
+  Future _upgradeDB(Database db, int oldVersion, int newVersion) async {
+    if (oldVersion < 2) {
+      // Migrate from version 1 to 2
+      await db.execute('''
+        CREATE TABLE bill_items_new (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          billId INTEGER NOT NULL,
+          productId INTEGER NOT NULL,
+          weight REAL NOT NULL,
+          price REAL NOT NULL,
+          FOREIGN KEY (billId) REFERENCES bills(id),
+          FOREIGN KEY (productId) REFERENCES products(id)
+        )
+      ''');
+
+      // Copy data from old table to new table
+      await db.execute('''
+        INSERT INTO bill_items_new (id, billId, productId, weight, price)
+        SELECT id, billId, productId, quantity * 1000, price FROM bill_items
+      ''');
+
+      // Drop old table
+      await db.execute('DROP TABLE bill_items');
+
+      // Rename new table
+      await db.execute('ALTER TABLE bill_items_new RENAME TO bill_items');
+    }
   }
 
   // Product operations
@@ -229,6 +264,25 @@ class DatabaseHelper {
         serialNumber: maps[i]['serialNumber'],
       );
     });
+  }
+
+  Future<int> updateProduct(Product product) async {
+    final db = await instance.database;
+    return await db.update(
+      'products',
+      product.toMap(),
+      where: 'id = ?',
+      whereArgs: [product.id],
+    );
+  }
+
+  Future<int> deleteProduct(int id) async {
+    final db = await instance.database;
+    return await db.delete(
+      'products',
+      where: 'id = ?',
+      whereArgs: [id],
+    );
   }
 
   Future<Product?> getProductBySerialNumber(int serialNumber) async {
@@ -259,6 +313,16 @@ class DatabaseHelper {
       'grandTotal': bill.grandTotal,
     });
 
+    // Insert bill items with weight
+    for (var item in items) {
+      await db.insert('bill_items', {
+        'billId': billId,
+        'productId': item.product.id,
+        'weight': item.weight, // Store weight in grams
+        'price': item.totalPrice,
+      });
+    }
+
     return billId;
   }
 
@@ -285,7 +349,7 @@ class DatabaseHelper {
           final product = Product.fromMap(productMap.first);
           items.add(BillItem(
             product: product,
-            quantity: itemMap['quantity'],
+            weight: itemMap['weight'], // Now using weight directly
           ));
         }
       }
@@ -297,6 +361,7 @@ class DatabaseHelper {
 
 // Main Page where items can be selected for billing
 class MainPage extends StatefulWidget {
+  const MainPage({Key? key}) : super(key: key);
   @override
   _MainPageState createState() => _MainPageState();
 }
@@ -321,22 +386,39 @@ class _MainPageState extends State<MainPage> {
     });
   }
 
+  void _incrementQuantity(int index) {
+    setState(() {
+      _currentBill[index].weight += 100; // Increase by 100g
+    });
+  }
+
+  void _decrementQuantity(int index) {
+    if (_currentBill[index].weight > 100) {
+      setState(() {
+        _currentBill[index].weight -= 100; // Decrease by 100g
+      });
+    } else {
+      _removeItemFromBill(index);
+    }
+  }
+
   void _addProductToCurrentBill(Product product) {
     bool found = false;
     for (var i = 0; i < _currentBill.length; i++) {
       if (_currentBill[i].product.id == product.id) {
-        setState(() {
-          _currentBill[i].quantity += 1;
-        });
+        // For weight-based items, we'll show a dialog to input new weight instead of incrementing
+        _showWeightInputDialog(i);
         found = true;
         break;
       }
     }
 
     if (!found) {
+      // Add new product with default weight and immediately show dialog to adjust
       setState(() {
         _currentBill.add(BillItem(product: product));
       });
+      _showWeightInputDialog(_currentBill.length - 1);
     }
 
     // Show confirmation animation
@@ -347,6 +429,71 @@ class _MainPageState extends State<MainPage> {
         duration: Duration(seconds: 1),
         behavior: SnackBarBehavior.floating,
         backgroundColor: Colors.green,
+      ),
+    );
+  }
+
+  void _showWeightInputDialog(int index) {
+    final weightController = TextEditingController(
+        text: _currentBill[index].weight.toStringAsFixed(0));
+
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text('Enter Weight'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(
+                'Enter weight for ${_currentBill[index].product.name} in grams:'),
+            SizedBox(height: 16),
+            TextField(
+              controller: weightController,
+              keyboardType: TextInputType.number,
+              decoration: InputDecoration(
+                labelText: 'Weight (g)',
+                border: OutlineInputBorder(),
+                suffixText: 'g',
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: Text('Cancel'),
+          ),
+          ElevatedButton(
+            onPressed: () {
+              try {
+                final newWeight = double.parse(weightController.text);
+                if (newWeight > 0) {
+                  setState(() {
+                    _currentBill[index].weight = newWeight;
+                  });
+                  Navigator.pop(context);
+                } else {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(
+                      content: Text('Weight must be greater than 0'),
+                      behavior: SnackBarBehavior.floating,
+                      backgroundColor: Colors.red,
+                    ),
+                  );
+                }
+              } catch (e) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(
+                    content: Text('Please enter a valid number'),
+                    behavior: SnackBarBehavior.floating,
+                    backgroundColor: Colors.red,
+                  ),
+                );
+              }
+            },
+            child: Text('Update'),
+          ),
+        ],
       ),
     );
   }
@@ -366,22 +513,6 @@ class _MainPageState extends State<MainPage> {
         backgroundColor: Colors.orange,
       ),
     );
-  }
-
-  void _incrementQuantity(int index) {
-    setState(() {
-      _currentBill[index].quantity += 1;
-    });
-  }
-
-  void _decrementQuantity(int index) {
-    if (_currentBill[index].quantity > 1) {
-      setState(() {
-        _currentBill[index].quantity -= 1;
-      });
-    } else {
-      _removeItemFromBill(index);
-    }
   }
 
   double _calculateTotal() {
@@ -423,55 +554,55 @@ class _MainPageState extends State<MainPage> {
   }
 
   Future<void> _finalizeBill() async {
-  if (_currentBill.isEmpty) {
+    if (_currentBill.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('No items in the bill'),
+          behavior: SnackBarBehavior.floating,
+          backgroundColor: Colors.red,
+        ),
+      );
+      return;
+    }
+
+    final total = _calculateTotal();
+    final tax = total * 0.00; // Assuming 18% tax
+    final grandTotal = total + tax;
+
+    final bill = Bill(
+      id: DateTime.now().millisecondsSinceEpoch, // Unique ID
+      date: DateTime.now(),
+      items: _currentBill,
+      total: total,
+      tax: tax,
+      grandTotal: grandTotal,
+    );
+
+    await DatabaseHelper.instance.saveBill(bill, _currentBill);
+
+    setState(() {
+      _currentBill = [];
+    });
+
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
-        content: Text('No items in the bill'),
+        content: Row(
+          children: [
+            Icon(Icons.check_circle, color: Colors.white),
+            SizedBox(width: 10),
+            Text('Bill saved successfully'),
+          ],
+        ),
         behavior: SnackBarBehavior.floating,
-        backgroundColor: Colors.red,
+        backgroundColor: Colors.green,
       ),
     );
-    return;
+
+    Navigator.push(
+      context,
+      MaterialPageRoute(builder: (context) => BillDisplayPage(bill: bill)),
+    );
   }
-
-  final total = _calculateTotal();
-  final tax = total * 0.18; // Assuming 18% tax
-  final grandTotal = total + tax;
-
-  final bill = Bill(
-    id: DateTime.now().millisecondsSinceEpoch, // Unique ID
-    date: DateTime.now(),
-    items: _currentBill,
-    total: total,
-    tax: tax,
-    grandTotal: grandTotal,
-  );
-
-  await DatabaseHelper.instance.saveBill(bill, _currentBill);
-
-  setState(() {
-    _currentBill = [];
-  });
-
-  ScaffoldMessenger.of(context).showSnackBar(
-    SnackBar(
-      content: Row(
-        children: [
-          Icon(Icons.check_circle, color: Colors.white),
-          SizedBox(width: 10),
-          Text('Bill saved successfully'),
-        ],
-      ),
-      behavior: SnackBarBehavior.floating,
-      backgroundColor: Colors.green,
-    ),
-  );
-
-  Navigator.push(
-    context,
-    MaterialPageRoute(builder: (context) => BillDisplayPage(bill: bill)),
-  );
-}
 
   List<Product> get filteredProducts {
     if (_searchQuery.isEmpty) {
@@ -495,7 +626,7 @@ class _MainPageState extends State<MainPage> {
     // Determine grid columns based on screen width
     int gridColumns = 4;
     if (isLargeScreen) {
-      gridColumns = 5;
+      gridColumns = 4;
     } else if (isMediumScreen) {
       gridColumns = 3;
     } else {
@@ -508,7 +639,7 @@ class _MainPageState extends State<MainPage> {
           children: [
             Icon(Icons.shopping_cart, size: 28),
             SizedBox(width: 10),
-            Text('POS Billing System'),
+            Text('Billing System'),
           ],
         ),
         backgroundColor: Theme.of(context).colorScheme.primary,
@@ -528,6 +659,26 @@ class _MainPageState extends State<MainPage> {
             ),
           ),
           IconButton(
+            icon: Icon(Icons.analytics),
+            tooltip: 'View analytics',
+            onPressed: () {
+              Navigator.push(
+                context,
+                MaterialPageRoute(builder: (context) => AnalyticsPage()),
+              );
+            },
+          ),
+          IconButton(
+            icon: Icon(Icons.money_off_rounded),
+            tooltip: 'Expense Tracker',
+            onPressed: () {
+              Navigator.push(
+                context,
+                MaterialPageRoute(builder: (context) => ExpenseTrackerPage()),
+              );
+            },
+          ),
+          IconButton(
             icon: Icon(Icons.history),
             tooltip: 'View sales history',
             onPressed: () {
@@ -540,7 +691,6 @@ class _MainPageState extends State<MainPage> {
               );
             },
           ),
-          SizedBox(width: 12),
         ],
       ),
       body: Container(
@@ -560,6 +710,7 @@ class _MainPageState extends State<MainPage> {
             Expanded(
               flex: isLargeScreen ? 3 : 2,
               child: Card(
+                color: Colors.white,
                 margin: EdgeInsets.all(16),
                 elevation: 4,
                 shape: RoundedRectangleBorder(
@@ -763,7 +914,7 @@ class _MainPageState extends State<MainPage> {
                                                 ),
                                               ),
                                               Text(
-                                                '\$${product.price.toStringAsFixed(2)}',
+                                                '₹${product.price.toStringAsFixed(2)}',
                                                 style: TextStyle(
                                                   color: Theme.of(context)
                                                       .colorScheme
@@ -790,6 +941,7 @@ class _MainPageState extends State<MainPage> {
             Expanded(
               flex: isLargeScreen ? 2 : 3,
               child: Card(
+                color: Colors.white,
                 margin: EdgeInsets.all(16),
                 elevation: 4,
                 shape: RoundedRectangleBorder(
@@ -844,189 +996,208 @@ class _MainPageState extends State<MainPage> {
                       ),
                     ),
                     Expanded(
-                      child: _currentBill.isEmpty
-                          ? Center(
-                              child: Column(
-                                mainAxisAlignment: MainAxisAlignment.center,
-                                children: [
-                                  Icon(
-                                    Icons.shopping_cart_outlined,
-                                    size: 64,
-                                    color: Colors.grey,
-                                  ),
-                                  SizedBox(height: 16),
-                                  Text(
-                                    'No items in the bill',
-                                    style: TextStyle(
-                                      fontSize: 18,
-                                      color: Colors.grey.shade700,
+                        child: _currentBill.isEmpty
+                            ? Center(
+                                child: Column(
+                                  mainAxisAlignment: MainAxisAlignment.center,
+                                  children: [
+                                    Icon(
+                                      Icons.shopping_cart_outlined,
+                                      size: 64,
+                                      color: Colors.grey,
                                     ),
-                                  ),
-                                  SizedBox(height: 8),
-                                  Text(
-                                    'Click on a product to add it to the bill',
-                                    style: TextStyle(
-                                      color: Colors.grey.shade600,
+                                    SizedBox(height: 16),
+                                    Text(
+                                      'No items in the bill',
+                                      style: TextStyle(
+                                        fontSize: 18,
+                                        color: Colors.grey.shade700,
+                                      ),
                                     ),
-                                  ),
-                                ],
-                              ),
-                            )
-                          : ListView.separated(
-                              padding: EdgeInsets.all(16),
-                              itemCount: _currentBill.length,
-                              separatorBuilder: (context, index) =>
-                                  Divider(height: 1),
-                              itemBuilder: (context, index) {
-                                final item = _currentBill[index];
-                                return Padding(
-                                  padding:
-                                      const EdgeInsets.symmetric(vertical: 8.0),
-                                  child: Row(
-                                    children: [
-                                      Expanded(
-                                        flex: 3,
-                                        child: Column(
-                                          crossAxisAlignment:
-                                              CrossAxisAlignment.start,
-                                          children: [
-                                            Text(
-                                              item.product.name,
-                                              style: TextStyle(
-                                                fontWeight: FontWeight.bold,
-                                                fontSize: 16,
-                                              ),
-                                            ),
-                                            SizedBox(height: 4),
-                                            Text(
-                                              'SN: ${item.product.serialNumber}',
-                                              style: TextStyle(
-                                                color: Colors.grey.shade600,
-                                                fontSize: 12,
-                                              ),
-                                            ),
-                                          ],
-                                        ),
+                                    SizedBox(height: 8),
+                                    Text(
+                                      'Click on a product to add it to the bill',
+                                      style: TextStyle(
+                                        color: Colors.grey.shade600,
                                       ),
-                                      Expanded(
-                                        flex: 1,
-                                        child: Text(
-                                          '\$${item.product.price.toStringAsFixed(2)}',
-                                          style: TextStyle(
-                                            color: Colors.grey.shade800,
-                                          ),
-                                        ),
-                                      ),
-                                      Expanded(
-                                        flex: 2,
-                                        child: Container(
-                                          decoration: BoxDecoration(
-                                            border: Border.all(
-                                                color: Colors.grey.shade300),
-                                            borderRadius:
-                                                BorderRadius.circular(8),
-                                          ),
-                                          child: Row(
-                                            mainAxisSize: MainAxisSize.min,
+                                    ),
+                                  ],
+                                ),
+                              )
+                            : ListView.separated(
+                                padding: EdgeInsets.all(16),
+                                itemCount: _currentBill.length,
+                                separatorBuilder: (context, index) =>
+                                    Divider(height: 1),
+                                itemBuilder: (context, index) {
+                                  final item = _currentBill[index];
+                                  return Padding(
+                                    padding: const EdgeInsets.symmetric(
+                                        vertical: 8.0),
+                                    child: Row(
+                                      children: [
+                                        Expanded(
+                                          flex: 3,
+                                          child: Column(
+                                            crossAxisAlignment:
+                                                CrossAxisAlignment.start,
                                             children: [
-                                              InkWell(
-                                                onTap: () =>
-                                                    _decrementQuantity(index),
-                                                borderRadius: BorderRadius.only(
-                                                  topLeft: Radius.circular(8),
-                                                  bottomLeft:
-                                                      Radius.circular(8),
-                                                ),
-                                                child: Container(
-                                                  padding: EdgeInsets.all(8),
-                                                  decoration: BoxDecoration(
-                                                    color: Colors.grey.shade100,
-                                                    borderRadius:
-                                                        BorderRadius.only(
-                                                      topLeft:
-                                                          Radius.circular(8),
-                                                      bottomLeft:
-                                                          Radius.circular(8),
-                                                    ),
-                                                  ),
-                                                  child: Icon(
-                                                    Icons.remove,
-                                                    size: 16,
-                                                    color: Colors.grey.shade700,
-                                                  ),
+                                              Text(
+                                                item.product.name,
+                                                style: TextStyle(
+                                                  fontWeight: FontWeight.bold,
+                                                  fontSize: 16,
                                                 ),
                                               ),
-                                              Expanded(
-                                                child: Container(
-                                                  alignment: Alignment.center,
-                                                  padding: EdgeInsets.symmetric(
-                                                      horizontal: 8),
-                                                  child: Text(
-                                                    '${item.quantity}',
-                                                    style: TextStyle(
-                                                      fontWeight:
-                                                          FontWeight.bold,
-                                                    ),
-                                                  ),
-                                                ),
-                                              ),
-                                              InkWell(
-                                                onTap: () =>
-                                                    _incrementQuantity(index),
-                                                borderRadius: BorderRadius.only(
-                                                  topRight: Radius.circular(8),
-                                                  bottomRight:
-                                                      Radius.circular(8),
-                                                ),
-                                                child: Container(
-                                                  padding: EdgeInsets.all(8),
-                                                  decoration: BoxDecoration(
-                                                    color: Colors.grey.shade100,
-                                                    borderRadius:
-                                                        BorderRadius.only(
-                                                      topRight:
-                                                          Radius.circular(8),
-                                                      bottomRight:
-                                                          Radius.circular(8),
-                                                    ),
-                                                  ),
-                                                  child: Icon(
-                                                    Icons.add,
-                                                    size: 16,
-                                                    color: Colors.grey.shade700,
-                                                  ),
+                                              SizedBox(height: 4),
+                                              Text(
+                                                'SN: ${item.product.serialNumber}',
+                                                style: TextStyle(
+                                                  color: Colors.grey.shade600,
+                                                  fontSize: 12,
                                                 ),
                                               ),
                                             ],
                                           ),
                                         ),
-                                      ),
-                                      SizedBox(width: 16),
-                                      Expanded(
-                                        flex: 1,
-                                        child: Text(
-                                          '\$${item.totalPrice.toStringAsFixed(2)}',
-                                          style: TextStyle(
-                                            fontWeight: FontWeight.bold,
-                                            fontSize: 16,
+                                        Expanded(
+                                          flex: 1,
+                                          child: Column(
+                                            crossAxisAlignment:
+                                                CrossAxisAlignment.start,
+                                            children: [
+                                              Text(
+                                                '₹${item.product.price.toStringAsFixed(2)}/kg',
+                                                style: TextStyle(
+                                                  color: Colors.grey.shade800,
+                                                ),
+                                              ),
+                                            ],
                                           ),
-                                          textAlign: TextAlign.end,
                                         ),
-                                      ),
-                                      IconButton(
-                                        icon: Icon(Icons.delete_outline,
-                                            color: Colors.red),
-                                        onPressed: () =>
-                                            _removeItemFromBill(index),
-                                        tooltip: 'Remove item',
-                                        splashRadius: 24,
-                                      ),
-                                    ],
-                                  ),
-                                );
-                              },
-                            ),
-                    ),
+                                        Expanded(
+                                          flex: 2,
+                                          child: Container(
+                                            decoration: BoxDecoration(
+                                              border: Border.all(
+                                                  color: Colors.grey.shade300),
+                                              borderRadius:
+                                                  BorderRadius.circular(8),
+                                            ),
+                                            child: Row(
+                                              mainAxisSize: MainAxisSize.min,
+                                              children: [
+                                                InkWell(
+                                                  onTap: () =>
+                                                      _decrementQuantity(index),
+                                                  borderRadius:
+                                                      BorderRadius.only(
+                                                    topLeft: Radius.circular(8),
+                                                    bottomLeft:
+                                                        Radius.circular(8),
+                                                  ),
+                                                  child: Container(
+                                                    padding: EdgeInsets.all(8),
+                                                    decoration: BoxDecoration(
+                                                      color:
+                                                          Colors.grey.shade100,
+                                                      borderRadius:
+                                                          BorderRadius.only(
+                                                        topLeft:
+                                                            Radius.circular(8),
+                                                        bottomLeft:
+                                                            Radius.circular(8),
+                                                      ),
+                                                    ),
+                                                    child: Icon(
+                                                      Icons.remove,
+                                                      size: 16,
+                                                      color:
+                                                          Colors.grey.shade700,
+                                                    ),
+                                                  ),
+                                                ),
+                                                Expanded(
+                                                  child: InkWell(
+                                                    onTap: () =>
+                                                        _showWeightInputDialog(
+                                                            index),
+                                                    child: Container(
+                                                      alignment:
+                                                          Alignment.center,
+                                                      padding:
+                                                          EdgeInsets.symmetric(
+                                                              horizontal: 8),
+                                                      child: Text(
+                                                        '${item.weight.toStringAsFixed(0)}g',
+                                                        style: TextStyle(
+                                                          fontWeight:
+                                                              FontWeight.bold,
+                                                        ),
+                                                      ),
+                                                    ),
+                                                  ),
+                                                ),
+                                                InkWell(
+                                                  onTap: () =>
+                                                      _incrementQuantity(index),
+                                                  borderRadius:
+                                                      BorderRadius.only(
+                                                    topRight:
+                                                        Radius.circular(8),
+                                                    bottomRight:
+                                                        Radius.circular(8),
+                                                  ),
+                                                  child: Container(
+                                                    padding: EdgeInsets.all(8),
+                                                    decoration: BoxDecoration(
+                                                      color:
+                                                          Colors.grey.shade100,
+                                                      borderRadius:
+                                                          BorderRadius.only(
+                                                        topRight:
+                                                            Radius.circular(8),
+                                                        bottomRight:
+                                                            Radius.circular(8),
+                                                      ),
+                                                    ),
+                                                    child: Icon(
+                                                      Icons.add,
+                                                      size: 16,
+                                                      color:
+                                                          Colors.grey.shade700,
+                                                    ),
+                                                  ),
+                                                ),
+                                              ],
+                                            ),
+                                          ),
+                                        ),
+                                        SizedBox(width: 16),
+                                        Expanded(
+                                          flex: 1,
+                                          child: Text(
+                                            '₹${item.totalPrice.toStringAsFixed(2)}',
+                                            style: TextStyle(
+                                              fontWeight: FontWeight.bold,
+                                              fontSize: 15,
+                                            ),
+                                            textAlign: TextAlign.end,
+                                          ),
+                                        ),
+                                        IconButton(
+                                          icon: Icon(Icons.delete_outline,
+                                              color: Colors.red),
+                                          onPressed: () =>
+                                              _removeItemFromBill(index),
+                                          tooltip: 'Remove item',
+                                          splashRadius: 24,
+                                        ),
+                                      ],
+                                    ),
+                                  );
+                                },
+                              )),
                     Container(
                       padding: EdgeInsets.all(20),
                       decoration: BoxDecoration(
@@ -1064,7 +1235,7 @@ class _MainPageState extends State<MainPage> {
                                       style: TextStyle(fontSize: 16),
                                     ),
                                     Text(
-                                      '\$${_calculateTotal().toStringAsFixed(2)}',
+                                      '₹${_calculateTotal().toStringAsFixed(2)}',
                                       style: TextStyle(
                                         fontSize: 16,
                                         fontWeight: FontWeight.w500,
@@ -1078,11 +1249,11 @@ class _MainPageState extends State<MainPage> {
                                       MainAxisAlignment.spaceBetween,
                                   children: [
                                     Text(
-                                      'Tax (18%):',
+                                      'Tax (0%):',
                                       style: TextStyle(fontSize: 16),
                                     ),
                                     Text(
-                                      '\$${(_calculateTotal() * 0.18).toStringAsFixed(2)}',
+                                      '₹${(_calculateTotal() * 0.00).toStringAsFixed(2)}',
                                       style: TextStyle(
                                         fontSize: 16,
                                         fontWeight: FontWeight.w500,
@@ -1105,7 +1276,7 @@ class _MainPageState extends State<MainPage> {
                                       ),
                                     ),
                                     Text(
-                                      '\$${(_calculateTotal() * 1.18).toStringAsFixed(2)}',
+                                      '₹${(_calculateTotal() * 1.0).toStringAsFixed(2)}',
                                       style: TextStyle(
                                         fontSize: 20,
                                         fontWeight: FontWeight.bold,
@@ -1178,46 +1349,6 @@ class _MainPageState extends State<MainPage> {
           ],
         ),
       ),
-      bottomNavigationBar: BottomAppBar(
-        elevation: 8,
-        color: Colors.white,
-        child: Container(
-          height: 48,
-          padding: EdgeInsets.symmetric(horizontal: 20),
-          child: Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              Text(
-                '© ${DateTime.now().year} SIDA',
-                style: TextStyle(color: Colors.grey.shade600),
-              ),
-              Text(
-                'Powered by Flutter',
-                style: TextStyle(color: Colors.grey.shade600),
-              ),
-              Row(
-                children: [
-                  Text(
-                    'v1.0.0',
-                    style: TextStyle(color: Colors.grey.shade600),
-                  ),
-                  SizedBox(width: 8),
-                  Icon(
-                    Icons.circle,
-                    size: 10,
-                    color: Colors.green,
-                  ),
-                  SizedBox(width: 5),
-                  Text(
-                    'Online',
-                    style: TextStyle(color: Colors.grey.shade600),
-                  ),
-                ],
-              ),
-            ],
-          ),
-        ),
-      ),
     );
   }
 }
@@ -1225,6 +1356,7 @@ class _MainPageState extends State<MainPage> {
 // Additional responsive features could be implemented
 // For MenuPage which would need similar responsive treatment
 class CashierDashboard extends StatelessWidget {
+  const CashierDashboard({Key? key}) : super(key: key);
   @override
   Widget build(BuildContext context) {
     final Size screenSize = MediaQuery.of(context).size;

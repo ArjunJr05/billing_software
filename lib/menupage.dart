@@ -1,5 +1,5 @@
-import 'package:flutter/material.dart';
 import 'package:shop/main.dart';
+import 'package:flutter/material.dart';
 
 class MenuPage extends StatefulWidget {
   @override
@@ -14,6 +14,7 @@ class _MenuPageState extends State<MenuPage> {
   
   List<Product> _products = [];
   bool _isLoading = true;
+  Product? _editingProduct;
   
   @override
   void initState() {
@@ -53,10 +54,7 @@ class _MenuPageState extends State<MenuPage> {
       
       await DatabaseHelper.instance.insertProduct(product);
       
-      _nameController.clear();
-      _priceController.clear();
-      _serialNumberController.clear();
-      
+      _clearForm();
       _loadProducts();
       
       ScaffoldMessenger.of(context).showSnackBar(
@@ -69,14 +67,119 @@ class _MenuPageState extends State<MenuPage> {
     } catch (e) {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text('Error: Serial number may already exist'),
+          content: Text('Error: ${e.toString()}'),
           backgroundColor: Colors.red,
           behavior: SnackBarBehavior.floating,
         ),
       );
     }
   }
-  
+
+  Future<void> _updateProduct() async {
+    if (!_formKey.currentState!.validate() || _editingProduct == null) {
+      return;
+    }
+    
+    final name = _nameController.text;
+    final price = double.parse(_priceController.text);
+    final serialNumber = int.parse(_serialNumberController.text);
+    
+    try {
+      final updatedProduct = Product(
+        id: _editingProduct!.id,
+        name: name,
+        price: price,
+        serialNumber: serialNumber,
+      );
+      
+      await DatabaseHelper.instance.updateProduct(updatedProduct);
+      
+      _clearForm();
+      _loadProducts();
+      
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Product updated successfully'),
+          backgroundColor: Colors.green,
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+    } catch (e) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Error: ${e.toString()}'),
+          backgroundColor: Colors.red,
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+    }
+  }
+
+  Future<void> _deleteProduct(int productId) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text('Confirm Delete'),
+        content: Text('Are you sure you want to delete this product?'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: Text('Delete', style: TextStyle(color: Colors.red)),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed == true) {
+      try {
+        await DatabaseHelper.instance.deleteProduct(productId);
+        _loadProducts();
+        
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Product deleted successfully'),
+            backgroundColor: Colors.green,
+            behavior: SnackBarBehavior.floating,
+          ),
+        );
+      } catch (e) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Error deleting product: ${e.toString()}'),
+            backgroundColor: Colors.red,
+            behavior: SnackBarBehavior.floating,
+          ),
+        );
+      }
+    }
+  }
+
+  void _editProduct(Product product) {
+    setState(() {
+      _editingProduct = product;
+      _nameController.text = product.name;
+      _priceController.text = product.price.toString();
+      _serialNumberController.text = product.serialNumber.toString();
+    });
+  }
+
+  void _clearForm() {
+    setState(() {
+      _editingProduct = null;
+      _nameController.clear();
+      _priceController.clear();
+      _serialNumberController.clear();
+    });
+  }
+
+  void _cancelEdit() {
+    _clearForm();
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -105,7 +208,7 @@ class _MenuPageState extends State<MenuPage> {
         ),
         child: Row(
           children: [
-            // Add product form (left side)
+            // Add/Edit product form (left side)
             Expanded(
               flex: 2,
               child: Card(
@@ -124,13 +227,17 @@ class _MenuPageState extends State<MenuPage> {
                         Row(
                           children: [
                             Icon(
-                              Icons.add_circle,
+                              _editingProduct != null 
+                                ? Icons.edit 
+                                : Icons.add_circle,
                               color: Theme.of(context).primaryColor,
                               size: 28,
                             ),
                             SizedBox(width: 12),
                             Text(
-                              'Add New Product',
+                              _editingProduct != null 
+                                ? 'Edit Product' 
+                                : 'Add New Product',
                               style: TextStyle(
                                 fontSize: 22, 
                                 fontWeight: FontWeight.bold,
@@ -167,7 +274,7 @@ class _MenuPageState extends State<MenuPage> {
                               borderRadius: BorderRadius.circular(8),
                             ),
                             prefixIcon: Icon(Icons.attach_money),
-                            prefixText: '\$ ',
+                            prefixText: '₹ ',
                             filled: true,
                             fillColor: Colors.grey.shade50,
                           ),
@@ -210,21 +317,62 @@ class _MenuPageState extends State<MenuPage> {
                           },
                         ),
                         SizedBox(height: 30),
-                        ElevatedButton.icon(
-                          onPressed: _addProduct,
-                          style: ElevatedButton.styleFrom(
-                            minimumSize: Size(double.infinity, 56),
-                            shape: RoundedRectangleBorder(
-                              borderRadius: BorderRadius.circular(8),
+                        if (_editingProduct != null) ...[
+                          Row(
+                            children: [
+                              Expanded(
+                                child: ElevatedButton.icon(
+                                  onPressed: _updateProduct,
+                                  style: ElevatedButton.styleFrom(
+                                    minimumSize: Size(double.infinity, 56), backgroundColor: Colors.orange,
+                                    shape: RoundedRectangleBorder(
+                                      borderRadius: BorderRadius.circular(8),
+                                    ),
+                                    elevation: 2,
+                                  ),
+                                  icon: Icon(Icons.save),
+                                  label: Text(
+                                    'Update Product',
+                                    style: TextStyle(fontSize: 16),
+                                  ),
+                                ),
+                              ),
+                              SizedBox(width: 10),
+                              Expanded(
+                                child: OutlinedButton.icon(
+                                  onPressed: _cancelEdit,
+                                  style: OutlinedButton.styleFrom(
+                                    minimumSize: Size(double.infinity, 56),
+                                    shape: RoundedRectangleBorder(
+                                      borderRadius: BorderRadius.circular(8),
+                                    ),
+                                  ),
+                                  icon: Icon(Icons.cancel),
+                                  label: Text(
+                                    'Cancel',
+                                    style: TextStyle(fontSize: 16),
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ] else ...[
+                          ElevatedButton.icon(
+                            onPressed: _addProduct,
+                            style: ElevatedButton.styleFrom(
+                              minimumSize: Size(double.infinity, 56),
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(8),
+                              ),
+                              elevation: 2,
                             ),
-                            elevation: 2,
+                            icon: Icon(Icons.add_shopping_cart),
+                            label: Text(
+                              'Add Product',
+                              style: TextStyle(fontSize: 16),
+                            ),
                           ),
-                          icon: Icon(Icons.add_shopping_cart),
-                          label: Text(
-                            'Add Product',
-                            style: TextStyle(fontSize: 16),
-                          ),
-                        ),
+                        ],
                       ],
                     ),
                   ),
@@ -315,59 +463,100 @@ class _MenuPageState extends State<MenuPage> {
                               separatorBuilder: (context, index) => Divider(height: 1),
                               itemBuilder: (context, index) {
                                 final product = _products[index];
-                                return ListTile(
-                                  contentPadding: EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-                                  leading: CircleAvatar(
-                                    backgroundColor: Theme.of(context).primaryColor.withOpacity(0.1),
-                                    child: Text(
-                                      product.name.substring(0, 1).toUpperCase(),
-                                      style: TextStyle(
-                                        color: Theme.of(context).primaryColor,
-                                        fontWeight: FontWeight.bold,
-                                      ),
+                                return Dismissible(
+                                  key: Key(product.id.toString()),
+                                  background: Container(
+                                    color: Colors.red,
+                                    alignment: Alignment.centerRight,
+                                    padding: EdgeInsets.only(right: 20),
+                                    child: Icon(
+                                      Icons.delete,
+                                      color: Colors.white,
                                     ),
                                   ),
-                                  title: Text(
-                                    product.name,
-                                    style: TextStyle(
-                                      fontWeight: FontWeight.bold,
-                                      fontSize: 16,
-                                    ),
-                                  ),
-                                  subtitle: Row(
-                                    children: [
-                                      Icon(
-                                        Icons.qr_code,
-                                        size: 14,
-                                        color: Colors.grey.shade600,
+                                  confirmDismiss: (direction) async {
+                                    return await showDialog<bool>(
+                                      context: context,
+                                      builder: (context) => AlertDialog(
+                                        title: Text('Confirm Delete'),
+                                        content: Text('Are you sure you want to delete ${product.name}?'),
+                                        actions: [
+                                          TextButton(
+                                            onPressed: () => Navigator.pop(context, false),
+                                            child: Text('Cancel'),
+                                          ),
+                                          TextButton(
+                                            onPressed: () => Navigator.pop(context, true),
+                                            child: Text('Delete', style: TextStyle(color: Colors.red)),
+                                          ),
+                                        ],
                                       ),
-                                      SizedBox(width: 4),
-                                      Text(
-                                        'SN: ${product.serialNumber}',
+                                    );
+                                  },
+                                  onDismissed: (direction) {
+                                    _deleteProduct(product.id);
+                                  },
+                                  child: ListTile(
+                                    contentPadding: EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                                    leading: CircleAvatar(
+                                      backgroundColor: Theme.of(context).primaryColor.withOpacity(0.1),
+                                      child: Text(
+                                        product.name.substring(0, 1).toUpperCase(),
                                         style: TextStyle(
-                                          color: Colors.grey.shade600,
+                                          color: Theme.of(context).primaryColor,
+                                          fontWeight: FontWeight.bold,
                                         ),
                                       ),
-                                    ],
-                                  ),
-                                  trailing: Container(
-                                    padding: EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                                    decoration: BoxDecoration(
-                                      color: Colors.green.shade50,
-                                      borderRadius: BorderRadius.circular(16),
-                                      border: Border.all(color: Colors.green.shade200),
                                     ),
-                                    child: Text(
-                                      '\$${product.price.toStringAsFixed(2)}',
+                                    title: Text(
+                                      product.name,
                                       style: TextStyle(
                                         fontWeight: FontWeight.bold,
-                                        color: Colors.green.shade700,
+                                        fontSize: 16,
                                       ),
                                     ),
+                                    subtitle: Row(
+                                      children: [
+                                        Icon(
+                                          Icons.qr_code,
+                                          size: 14,
+                                          color: Colors.grey.shade600,
+                                        ),
+                                        SizedBox(width: 4),
+                                        Text(
+                                          'SN: ${product.serialNumber}',
+                                          style: TextStyle(
+                                            color: Colors.grey.shade600,
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                    trailing: Row(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        Container(
+                                          padding: EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                                          decoration: BoxDecoration(
+                                            color: Colors.green.shade50,
+                                            borderRadius: BorderRadius.circular(16),
+                                            border: Border.all(color: Colors.green.shade200),
+                                          ),
+                                          child: Text(
+                                            '₹${product.price.toStringAsFixed(2)}',
+                                            style: TextStyle(
+                                              fontWeight: FontWeight.bold,
+                                              color: Colors.green.shade700,
+                                            ),
+                                          ),
+                                        ),
+                                        SizedBox(width: 10),
+                                        IconButton(
+                                          icon: Icon(Icons.edit, color: Colors.blue),
+                                          onPressed: () => _editProduct(product),
+                                        ),
+                                      ],
+                                    ),
                                   ),
-                                  onTap: () {
-                                    // Show product details or edit options
-                                  },
                                 );
                               },
                             ),
